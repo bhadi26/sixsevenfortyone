@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <!--
+    CONTENT SECURITY POLICY
+    Locks down what this page is allowed to do:
+    - default-src 'none'      : block everything unless explicitly allowed below
+    - script-src 'self'       : only run scripts from this same file (inline via 'unsafe-inline' needed for the game script block)
+    - style-src 'self'        : same for styles
+    - img-src 'self' data:    : allow the canvas to export images (data: URIs)
+    - frame-ancestors 'none'  : prevent this page being embedded in an iframe on another site
+    - base-uri 'self'         : prevent <base> tag hijacking
+    - form-action 'none'      : no forms, no submissions
+    No external scripts, fonts, or connections are allowed at all.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+    content="
+      default-src 'none';
+      script-src 'unsafe-inline';
+      style-src 'unsafe-inline';
+      img-src 'self' data:;
+      frame-ancestors 'none';
+      base-uri 'self';
+      form-action 'none';
+    ">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <title>Number Jump</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #0a0a1a; overflow: hidden; }
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: monospace; color: #fff; }
+    #wrap { width: 100%; max-width: 640px; padding: 16px; }
+    #hud { display: flex; justify-content: space-between; padding: 0 4px 10px; font-size: 16px; }
+    #hud span { color: #fff; font-weight: bold; }
+    canvas { display: block; width: 100%; background: #0f0f2a; border-radius: 14px; border: 1px solid #2a2a5a; cursor: pointer; }
+    #instruction { text-align: center; font-size: 13px; color: #666; padding: 8px 0; }
+    #jumpBtn {
+      display: block; width: 100%; padding: 16px;
+      background: #3a3aff; border: none; border-radius: 12px;
+      color: #fff; font-size: 20px; font-weight: bold;
+      cursor: pointer; font-family: monospace; letter-spacing: 2px;
+      margin-top: 12px; touch-action: manipulation;
+    }
+    #jumpBtn:active { background: #2222cc; transform: scale(0.98); }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Best: <span id="best">0</span></div>
+    <div>Lives: <span id="lives">♥ ♥ ♥</span></div>
+  </div>
+  <canvas id="c" height="240"></canvas>
+  <div id="instruction">Jump over 6, 7, and 41 to score!</div>
+  <button id="jumpBtn">JUMP / START</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const livesEl = document.getElementById('lives');
+const btn = document.getElementById('jumpBtn');
+
+const JUMP_NUMS = new Set([6, 7, 41]);
+const POOL_TARGETS = [6, 7, 41];
+const POOL_OTHERS  = [1, 2, 3, 4, 5, 8, 9, 10, 12, 13, 15, 20, 22, 30, 42, 50];
+
+const H = 240;
+const GROUND_Y = H - 58;
+const PLAYER_X = 80;
+const PLAYER_W = 38, PLAYER_H = 38;
+const TILE_W = 50, TILE_H = 42;
+const TILE_Y = GROUND_Y + 2;
+
+let state = 'idle';
+let score = 0, best = 0, lives = 3;
+let playerY = GROUND_Y;
+let velY = 0, jumping = false;
+let numbers = [];
+let spawnTimer = 0, spawnInterval = 85;
+let speed = 3.2, frame = 0;
+let flashTimer = 0, flashColor = '';
+let popText = '', popTimer = 0;
+
+function livesStr(n) {
+  return n <= 0 ? '—' : '♥ '.repeat(n).trim();
+}
+
+function jump() {
+  if (state === 'idle' || state === 'dead') { resetGame(); return; }
+  if (!jumping) { velY = -13.5; jumping = true; }
+}
+
+function resetGame() {
+  state = 'playing'; score = 0; lives = 3;
+  playerY = GROUND_Y; velY = 0; jumping = false;
+  numbers = []; spawnTimer = 0; spawnInterval = 85;
+  speed = 3.2; frame = 0;
+  scoreEl.textContent = 0;
+  livesEl.textContent = livesStr(3);
+}
+
+function spawnNumber() {
+  const isTarget = Math.random() < 0.55;
+  const pool = isTarget ? POOL_TARGETS : POOL_OTHERS;
+  const n = pool[Math.floor(Math.random() * pool.length)];
+  numbers.push({ x: canvas.width + 20, num: n, isTarget: JUMP_NUMS.has(n), passed: false, hit: false, scale: 1 });
+}
+
+function loseLife(msg) {
+  lives--;
+  flashColor = '#ff3333'; flashTimer = 22;
+  popText = msg; popTimer = 55;
+  livesEl.textContent = livesStr(lives);
+  if (lives <= 0) {
+    state = 'dead';
+    if (score > best) { best = score; bestEl.textContent = best; }
+  }
+}
+
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+
+  velY += 0.72;
+  playerY += velY;
+  if (playerY >= GROUND_Y) { playerY = GROUND_Y; velY = 0; jumping = false; }
+
+  spawnTimer++;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnNumber();
+    spawnInterval = Math.max(40, spawnInterval - 0.3);
+    speed = Math.min(8, speed + 0.04);
+  }
+
+  const pFeet = playerY + PLAYER_H;
+  const playerIsGrounded = pFeet >= GROUND_Y + PLAYER_H - 10;
+  const pL = PLAYER_X;
+  const pR = PLAYER_X + PLAYER_W;
+
+  for (let nb of numbers) {
+    nb.x -= speed;
+    const nL = nb.x;
+    const nR = nb.x + TILE_W;
+    const horizOverlap = pR > nL && pL < nR;
+
+    if (!nb.passed && nR < PLAYER_X) {
+      nb.passed = true;
+      if (nb.isTarget && !nb.hit) {
+        loseLife(`Missed ${nb.num}!`);
+      }
+    }
+
+    if (!nb.hit && !nb.passed && horizOverlap) {
+      if (nb.isTarget) {
+        if (jumping || !playerIsGrounded) {
+          if (nR < PLAYER_X + PLAYER_W / 2) {
+            nb.hit = true;
+            score++;
+            scoreEl.textContent = score;
+            flashColor = '#22ff88'; flashTimer = 14;
+            popText = `+1  ${nb.num}!`; popTimer = 55;
+          }
+        } else {
+          nb.hit = true;
+          loseLife(`Jump over ${nb.num}!`);
+        }
+      } else {
+        if (!playerIsGrounded && pFeet > TILE_Y + 8) {
+          nb.hit = true;
+          loseLife(`Wrong! Not ${nb.num}`);
+        }
+      }
+    }
+
+    if (nb.hit) nb.scale = Math.max(0, nb.scale - 0.08);
+  }
+
+  numbers = numbers.filter(nb => nb.x > -80);
+  if (flashTimer > 0) flashTimer--;
+  if (popTimer > 0) popTimer--;
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+}
+
+function drawPlayer() {
+  const sq = jumping ? 1.18 : (velY > 3 ? 0.86 : 1);
+  const sw = PLAYER_W*(1/sq), sh = PLAYER_H*sq;
+  const ox = (PLAYER_W-sw)/2;
+  const px = PLAYER_X+ox, py = playerY+(PLAYER_H-sh);
+  ctx.fillStyle = '#4a90ff';
+  roundRect(px, py, sw, sh, 9); ctx.fill();
+  const ey = py + sh*0.3;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(px+sw*0.28, ey, 4.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+sw*0.72, ey, 4.5, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(px+sw*0.30, ey+1, 2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+sw*0.74, ey+1, 2, 0, Math.PI*2); ctx.fill();
+}
+
+function drawNumbers() {
+  for (let nb of numbers) {
+    if (nb.scale <= 0) continue;
+    const cx = nb.x + 25, cy = GROUND_Y + 23;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(nb.scale, nb.scale);
+    ctx.fillStyle = nb.isTarget ? (nb.hit ? '#22ff88' : '#ffdd44') : '#4a9eff';
+    roundRect(-25, -21, 50, 42, 9); ctx.fill();
+    ctx.strokeStyle = nb.isTarget ? '#cc8800' : '#1a5fbb';
+    ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = nb.isTarget ? '#1a1000' : '#001030';
+    ctx.font = `bold ${nb.num >= 10 ? 19 : 23}px monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(nb.num, 0, 1);
+    ctx.restore();
+  }
+}
+
+function draw() {
+  canvas.width = canvas.clientWidth || 600;
+  ctx.fillStyle = '#0f0f2a';
+  ctx.fillRect(0, 0, canvas.width, H);
+
+  if (flashTimer > 0) {
+    ctx.fillStyle = flashColor;
+    ctx.globalAlpha = (flashTimer/22)*0.22;
+    ctx.fillRect(0, 0, canvas.width, H);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.strokeStyle = '#1e1e4a'; ctx.lineWidth = 1; ctx.setLineDash([5,9]);
+  for (let i = 0; i < 5; i++) {
+    const lx = ((frame*speed*0.25)+(i*(canvas.width/4))) % canvas.width;
+    ctx.beginPath(); ctx.moveTo(lx,50); ctx.lineTo(lx-25,H-10); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#3535aa'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0,GROUND_Y+PLAYER_H+6); ctx.lineTo(canvas.width,GROUND_Y+PLAYER_H+6); ctx.stroke();
+
+  drawNumbers();
+  if (state !== 'idle') drawPlayer();
+
+  if (popTimer > 0 && state === 'playing') {
+    ctx.globalAlpha = Math.min(1, popTimer/30);
+    ctx.fillStyle = popText.startsWith('+') ? '#22ff88' : '#ff6666';
+    ctx.font = 'bold 17px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(popText, canvas.width/2, 36);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.textAlign = 'center';
+  if (state === 'idle') {
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px monospace';
+    ctx.fillText('NUMBER JUMP', canvas.width/2, H/2 - 28);
+    ctx.fillStyle = '#ffdd44'; ctx.font = '15px monospace';
+    ctx.fillText('Jump over:  6,  7,  or  41  to score', canvas.width/2, H/2 + 6);
+    ctx.fillStyle = '#888'; ctx.font = '13px monospace';
+    ctx.fillText('Tap JUMP or press SPACE to start', canvas.width/2, H/2 + 32);
+  }
+  if (state === 'dead') {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0,0,canvas.width,H);
+    ctx.fillStyle = '#ff4444'; ctx.font = 'bold 30px monospace';
+    ctx.fillText('GAME OVER', canvas.width/2, H/2 - 20);
+    ctx.fillStyle = '#fff'; ctx.font = '16px monospace';
+    ctx.fillText(`Score: ${score}    Best: ${best}`, canvas.width/2, H/2 + 12);
+    ctx.fillStyle = '#aaa'; ctx.font = '13px monospace';
+    ctx.fillText('Tap JUMP to play again', canvas.width/2, H/2 + 38);
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+btn.addEventListener('click', jump);
+canvas.addEventListener('click', jump);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); jump(); }, { passive: false });
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); }
+});
+
+loop();
+</script>
+</body>
+</html>
