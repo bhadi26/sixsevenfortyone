@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <title>Cat Game — Six Seven Forty One</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; background: #0d0d1f;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: monospace; overflow: hidden;
+    }
+    #wrap { width: 100%; max-width: 480px; padding: 12px; }
+    #hud {
+      display: flex; justify-content: space-between;
+      padding: 0 4px 8px; font-size: 15px; color: #aaa;
+    }
+    #hud span { color: #fff; font-weight: bold; }
+    canvas {
+      display: block; width: 100%;
+      border-radius: 14px; border: 1px solid #2a2a5a;
+      cursor: pointer;
+    }
+    #jumpBtn {
+      display: block; width: 100%; padding: 15px;
+      background: #3a3aff; border: none; border-radius: 12px;
+      color: #fff; font-size: 19px; font-weight: bold;
+      cursor: pointer; font-family: monospace; letter-spacing: 2px;
+      margin-top: 10px; touch-action: manipulation;
+    }
+    #jumpBtn:active { background: #2222cc; transform: scale(0.98); }
+    #backBtn {
+      display: inline-block; padding: 6px 14px;
+      background: transparent; border: 1px solid #3a3a6a;
+      border-radius: 8px; color: #888; font-size: 12px;
+      font-family: monospace; cursor: pointer;
+      text-decoration: none; margin-bottom: 6px;
+    }
+    #backBtn:hover { color: #fff; border-color: #6a6aaa; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <a href="index.html" id="backBtn">← Home</a>
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Best: <span id="best">0</span></div>
+  </div>
+  <canvas id="c"></canvas>
+  <button id="jumpBtn">JUMP / START</button>
+  <div id="hint">Hop on 6, 7, and 41 — avoid everything else!</div>
+</div>
+
+<script>
+const canvas  = document.getElementById('c');
+const ctx     = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl  = document.getElementById('best');
+const btn     = document.getElementById('jumpBtn');
+
+// ── canvas size ───────────────────────────────────────────────
+const W = 480, H = 420;
+canvas.width  = W;
+canvas.height = H;
+
+// ── constants ─────────────────────────────────────────────────
+const GROUND_Y   = H - 60;       // y of the ground line
+const BLOCK_W    = 64;
+const BLOCK_H    = 28;
+const CAT_W      = 44;
+const CAT_H      = 40;
+const GRAVITY    = 0.55;
+const JUMP_VEL   = -13;
+const SCROLL_SPD_INIT = 2.6;
+const TARGET_NUMS = new Set([6, 7, 41]);
+const POOL_TARGETS = [6, 7, 41];
+const POOL_OTHERS  = [2, 3, 4, 5, 8, 9, 10, 13, 15, 20, 22, 30, 42, 50];
+
+// ── state ─────────────────────────────────────────────────────
+let state = 'idle';
+let score = 0, best = 0;
+let scrollSpd = SCROLL_SPD_INIT;
+let frame = 0;
+let bgOffset = 0;
+
+// cat
+let cat = {};
+// blocks
+let blocks = [];
+// particles
+let particles = [];
+// feedback
+let flashTimer = 0, flashColor = '';
+let popText = '', popTimer = 0;
+
+// ── init ──────────────────────────────────────────────────────
+function resetGame() {
+  state     = 'playing';
+  score     = 0;
+  scrollSpd = SCROLL_SPD_INIT;
+  frame     = 0;
+  particles = [];
+  scoreEl.textContent = 0;
+
+  // cat starts standing on the first block
+  cat = {
+    x: 110,
+    y: 0,         // will be set when first block placed
+    vy: 0,
+    onGround: false,
+    standingOn: null,
+    animFrame: 0,
+    squish: 1,
+    dead: false,
+    jumpsLeft: 2,  // refills to 2 on landing; allows multi-jump in the air
+  };
+
+  // seed blocks ahead of the cat
+  blocks = [];
+  let bx = 80;
+  for (let i = 0; i < 9; i++) {
+    const isTarget = i === 0 ? true : Math.random() < 0.52;
+    const pool = isTarget ? POOL_TARGETS : POOL_OTHERS;
+    const num  = pool[Math.floor(Math.random() * pool.length)];
+    const by   = GROUND_Y - BLOCK_H - (Math.random() < 0.5 && i > 0 ? Math.floor(Math.random()*3)*28 : 0);
+    blocks.push({ x: bx, y: by, num, isTarget: TARGET_NUMS.has(num), scored: false, lit: false, litTimer: 0 });
+    bx += BLOCK_W + 18 + Math.floor(Math.random() * 28);
+  }
+
+  // place cat on first block
+  cat.y = blocks[0].y - CAT_H;
+  cat.onGround = true;
+  cat.standingOn = blocks[0];
+}
+
+// ── jump ──────────────────────────────────────────────────────
+function jump() {
+  if (state === 'idle' || state === 'dead') { resetGame(); return; }
+  if (!cat.dead && cat.jumpsLeft > 0) {
+    cat.vy = JUMP_VEL;
+    cat.onGround = false;
+    cat.standingOn = null;
+    cat.squish = 0.7;
+    cat.jumpsLeft--;
+  }
+}
+
+// ── spawn block ───────────────────────────────────────────────
+function spawnBlock() {
+  const last = blocks[blocks.length - 1];
+  const gap  = 80 + Math.floor(Math.random() * 40);
+  const isTarget = Math.random() < 0.52;
+  const pool = isTarget ? POOL_TARGETS : POOL_OTHERS;
+  const num  = pool[Math.floor(Math.random() * pool.length)];
+  // vary height: same level, one step up, or one step down
+  const heights = [0, -28, 28];
+  const dh = heights[Math.floor(Math.random() * heights.length)];
+  const newY = Math.min(GROUND_Y - BLOCK_H, Math.max(GROUND_Y - BLOCK_H - 84, (last ? last.y : GROUND_Y - BLOCK_H) + dh));
+  blocks.push({
+    x: (last ? last.x + BLOCK_W + gap : W + BLOCK_W),
+    y: newY,
+    num, isTarget: TARGET_NUMS.has(num),
+    scored: false, lit: false, litTimer: 0,
+  });
+}
+
+// ── particles ─────────────────────────────────────────────────
+function burst(x, y, color, n = 12) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1.5 + Math.random() * 3.5;
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 1, r: 2+Math.random()*4, alpha: 1, color });
+  }
+}
+
+// ── update ────────────────────────────────────────────────────
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+  bgOffset = (bgOffset + scrollSpd * 0.4) % W;
+
+  // gradually speed up
+  scrollSpd = SCROLL_SPD_INIT + frame * 0.0008;
+
+  // scroll blocks
+  for (let b of blocks) b.x -= scrollSpd;
+
+  // spawn new blocks
+  const lastB = blocks[blocks.length - 1];
+  if (!lastB || lastB.x < W - 20) spawnBlock();
+
+  // remove off-screen blocks
+  blocks = blocks.filter(b => b.x > -BLOCK_W - 10);
+
+  // ── cat physics ───────────────────────────────────────────
+  if (!cat.onGround) {
+    cat.vy += GRAVITY;
+    cat.y  += cat.vy;
+  } else if (cat.standingOn) {
+    // ride the block as it scrolls
+    cat.y = cat.standingOn.y - CAT_H;
+  }
+
+  // squish recovery
+  cat.squish += (1 - cat.squish) * 0.18;
+
+  // ── landing detection ─────────────────────────────────────
+  if (!cat.onGround && cat.vy > 0) {
+    for (let b of blocks) {
+      const catFeet  = cat.y + CAT_H;
+      const catLeft  = cat.x + 6;
+      const catRight = cat.x + CAT_W - 6;
+      const prevFeet = catFeet - cat.vy;
+
+      const horizOk = catRight > b.x + 4 && catLeft < b.x + BLOCK_W - 4;
+      const vertOk  = prevFeet <= b.y + 4 && catFeet >= b.y;
+
+      if (horizOk && vertOk) {
+        cat.y = b.y - CAT_H;
+        cat.vy = 0;
+        cat.onGround = true;
+        cat.standingOn = b;
+        cat.squish = 0.65;
+        cat.jumpsLeft = 99; // unlimited refill on landing
+
+        if (!b.scored) {
+          b.scored = true;
+          if (b.isTarget) {
+            score++;
+            scoreEl.textContent = score;
+            b.lit = true; b.litTimer = 40;
+            flashColor = '#22ff88'; flashTimer = 14;
+            popText = `+1  ${b.num}!`; popTimer = 55;
+            burst(cat.x + CAT_W/2, cat.y, '#22ff88');
+          } else {
+            // wrong block — die
+            flashColor = '#ff3333'; flashTimer = 22;
+            popText = `Not ${b.num}!`; popTimer = 55;
+            burst(cat.x + CAT_W/2, cat.y, '#ff4444');
+            cat.dead = true;
+            state = 'dead';
+            if (score > best) { best = score; bestEl.textContent = best; }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // fell below screen
+  if (cat.y > H + 40) {
+    if (state === 'playing') {
+      state = 'dead';
+      if (score > best) { best = score; bestEl.textContent = best; }
+      flashColor = '#ff3333'; flashTimer = 22;
+      popText = 'Fell off!'; popTimer = 55;
+    }
+  }
+
+  // cat scrolled off left edge
+  if (cat.x < -CAT_W - 20) {
+    if (state === 'playing') {
+      state = 'dead';
+      if (score > best) { best = score; bestEl.textContent = best; }
+    }
+  }
+
+  // block lit timer
+  for (let b of blocks) {
+    if (b.litTimer > 0) b.litTimer--;
+  }
+
+  // particles
+  for (let p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.alpha -= 0.03;
+  }
+  particles = particles.filter(p => p.alpha > 0);
+
+  if (flashTimer > 0) flashTimer--;
+  if (popTimer > 0) popTimer--;
+
+  cat.animFrame = Math.floor(frame / 8) % 4;
+}
+
+// ── draw helpers ──────────────────────────────────────────────
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// ── draw background ───────────────────────────────────────────
+function drawBg() {
+  // sky
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0d0d2e');
+  grad.addColorStop(1, '#1c1c4a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // moon
+  ctx.fillStyle = 'rgba(255,255,220,0.9)';
+  ctx.beginPath(); ctx.arc(W - 60, 55, 28, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#15153a';
+  ctx.beginPath(); ctx.arc(W - 50, 48, 24, 0, Math.PI*2); ctx.fill();
+
+  // stars
+  const stars = [[30,30],[80,18],[150,42],[240,22],[320,38],[410,15],[55,70],[200,60],[370,55],[440,70],[110,85],[290,80]];
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  for (let [sx, sy] of stars) {
+    ctx.beginPath(); ctx.arc(sx, sy, 1.3, 0, Math.PI*2); ctx.fill();
+  }
+
+  // scrolling ground strip
+  ctx.fillStyle = '#1a1a4a';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.strokeStyle = '#3535aa'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, GROUND_Y); ctx.lineTo(W, GROUND_Y); ctx.stroke();
+
+  // ground dashes
+  ctx.strokeStyle = '#2a2a6a'; ctx.lineWidth = 1; ctx.setLineDash([18, 18]);
+  ctx.beginPath();
+  ctx.moveTo(-bgOffset * 2, GROUND_Y + 20);
+  ctx.lineTo(W + 40, GROUND_Y + 20);
+  ctx.stroke(); ctx.setLineDash([]);
+}
+
+// ── draw blocks ───────────────────────────────────────────────
+function drawBlocks() {
+  for (let b of blocks) {
+    const lit = b.litTimer > 0;
+
+    // block shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    roundRect(b.x + 4, b.y + 6, BLOCK_W, BLOCK_H, 8);
+    ctx.fill();
+
+    // block body
+    if (b.isTarget) {
+      ctx.fillStyle = lit ? '#ffe066' : '#d4a800';
+    } else {
+      ctx.fillStyle = '#2a4a8a';
+    }
+    roundRect(b.x, b.y, BLOCK_W, BLOCK_H, 8); ctx.fill();
+
+    // block shine
+    ctx.fillStyle = b.isTarget ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)';
+    roundRect(b.x + 6, b.y + 4, BLOCK_W - 12, 8, 4); ctx.fill();
+
+    // border
+    ctx.strokeStyle = b.isTarget ? (lit ? '#fff59d' : '#c8960a') : '#1a3a7a';
+    ctx.lineWidth = 1.5; roundRect(b.x, b.y, BLOCK_W, BLOCK_H, 8); ctx.stroke();
+
+    // number
+    ctx.fillStyle = b.isTarget ? (lit ? '#fff' : '#fff8dc') : '#8ab0ff';
+    ctx.font = `bold ${b.num >= 10 ? 16 : 19}px monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.num, b.x + BLOCK_W/2, b.y + BLOCK_H/2 + 1);
+
+    // glow on lit blocks
+    if (lit) {
+      ctx.shadowColor = '#ffe066';
+      ctx.shadowBlur = 18;
+      roundRect(b.x, b.y, BLOCK_W, BLOCK_H, 8); ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+  }
+}
+
+// ── draw tuxedo cat ───────────────────────────────────────────
+function drawCat() {
+  const x  = cat.x;
+  const sy = cat.squish;
+  const cy = cat.y + CAT_H - (CAT_H * sy); // anchor feet
+  const bobY = cat.onGround ? Math.sin(frame * 0.12) * 1.2 : 0;
+
+  ctx.save();
+  ctx.translate(x + CAT_W/2, cy + CAT_H/2 + bobY);
+  ctx.scale(1, sy);
+
+  const bx = -CAT_W/2, by = -CAT_H/2;
+
+  // ── tail ───────────────────────────────────────────────────
+  const tailWag = cat.onGround ? Math.sin(frame * 0.15) * 0.4 : -0.3;
+  ctx.save();
+  ctx.translate(bx + 4, by + CAT_H * 0.6);
+  ctx.rotate(tailWag);
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-18, -10, -22, -28, -8, -36);
+  ctx.stroke();
+  ctx.restore();
+
+  // ── body (black) ───────────────────────────────────────────
+  ctx.fillStyle = '#1a1a1a';
+  roundRect(bx, by + 10, CAT_W, CAT_H - 10, 10); ctx.fill();
+
+  // ── white chest/belly ──────────────────────────────────────
+  ctx.fillStyle = '#f0f0f0';
+  ctx.beginPath();
+  ctx.ellipse(bx + CAT_W*0.52, by + CAT_H*0.55, CAT_W*0.28, CAT_H*0.32, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // ── legs ───────────────────────────────────────────────────
+  const legSwing = cat.onGround ? Math.sin(frame * 0.22) * 6 : 0;
+  // back legs
+  ctx.fillStyle = '#1a1a1a';
+  roundRect(bx + 6,        by + CAT_H - 16 + legSwing,  12, 16, 4); ctx.fill();
+  roundRect(bx + CAT_W-18, by + CAT_H - 16 - legSwing,  12, 16, 4); ctx.fill();
+  // white paws
+  ctx.fillStyle = '#f0f0f0';
+  ctx.beginPath(); ctx.ellipse(bx + 12,        by + CAT_H + 1, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(bx + CAT_W - 12, by + CAT_H + 1, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+
+  // ── head ───────────────────────────────────────────────────
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.ellipse(bx + CAT_W*0.5, by + 12, CAT_W*0.42, CAT_H*0.38, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // white face patch
+  ctx.fillStyle = '#f0f0f0';
+  ctx.beginPath();
+  ctx.ellipse(bx + CAT_W*0.52, by + 15, CAT_W*0.22, CAT_H*0.22, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // ── ears ───────────────────────────────────────────────────
+  ctx.fillStyle = '#1a1a1a';
+  // left ear
+  ctx.beginPath();
+  ctx.moveTo(bx + CAT_W*0.18, by + 6);
+  ctx.lineTo(bx + CAT_W*0.06, by - 12);
+  ctx.lineTo(bx + CAT_W*0.36, by + 2);
+  ctx.closePath(); ctx.fill();
+  // right ear
+  ctx.beginPath();
+  ctx.moveTo(bx + CAT_W*0.72, by + 4);
+  ctx.lineTo(bx + CAT_W*0.9,  by - 12);
+  ctx.lineTo(bx + CAT_W*0.58, by + 1);
+  ctx.closePath(); ctx.fill();
+  // inner ear pink
+  ctx.fillStyle = '#ff9999';
+  ctx.beginPath();
+  ctx.moveTo(bx + CAT_W*0.19, by + 3);
+  ctx.lineTo(bx + CAT_W*0.1,  by - 8);
+  ctx.lineTo(bx + CAT_W*0.32, by + 1);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(bx + CAT_W*0.70, by + 2);
+  ctx.lineTo(bx + CAT_W*0.86, by - 8);
+  ctx.lineTo(bx + CAT_W*0.60, by + 0);
+  ctx.closePath(); ctx.fill();
+
+  // ── eyes ───────────────────────────────────────────────────
+  if (state === 'dead' && cat.dead) {
+    // x eyes when dead
+    ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 2;
+    [-1,1].forEach(side => {
+      const ex = bx + CAT_W * (side < 0 ? 0.34 : 0.64), ey = by + 12;
+      ctx.beginPath(); ctx.moveTo(ex-4,ey-4); ctx.lineTo(ex+4,ey+4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ex+4,ey-4); ctx.lineTo(ex-4,ey+4); ctx.stroke();
+    });
+  } else {
+    // normal eyes — big green
+    ctx.fillStyle = '#88ff88';
+    ctx.beginPath(); ctx.ellipse(bx + CAT_W*0.34, by + 12, 5, 6, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(bx + CAT_W*0.64, by + 12, 5, 6, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.ellipse(bx + CAT_W*0.34, by + 12, 2.5, 5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(bx + CAT_W*0.64, by + 12, 2.5, 5, 0, 0, Math.PI*2); ctx.fill();
+    // eye shine
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(bx + CAT_W*0.36, by + 9, 1.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(bx + CAT_W*0.66, by + 9, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ── nose & whiskers ────────────────────────────────────────
+  ctx.fillStyle = '#ff9999';
+  ctx.beginPath();
+  ctx.moveTo(bx + CAT_W*0.5, by + 18);
+  ctx.lineTo(bx + CAT_W*0.44, by + 22);
+  ctx.lineTo(bx + CAT_W*0.56, by + 22);
+  ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+  // left whiskers
+  ctx.beginPath(); ctx.moveTo(bx + CAT_W*0.42, by+20); ctx.lineTo(bx + CAT_W*0.1, by+18); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx + CAT_W*0.42, by+22); ctx.lineTo(bx + CAT_W*0.1, by+24); ctx.stroke();
+  // right whiskers
+  ctx.beginPath(); ctx.moveTo(bx + CAT_W*0.58, by+20); ctx.lineTo(bx + CAT_W*0.9, by+18); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx + CAT_W*0.58, by+22); ctx.lineTo(bx + CAT_W*0.9, by+24); ctx.stroke();
+
+  ctx.restore();
+}
+
+// ── draw particles ────────────────────────────────────────────
+function drawParticles() {
+  for (let p of particles) {
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── draw HUD feedback ─────────────────────────────────────────
+function drawFeedback() {
+  if (flashTimer > 0) {
+    ctx.fillStyle = flashColor;
+    ctx.globalAlpha = (flashTimer / 24) * 0.2;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+  if (popTimer > 0 && state !== 'idle') {
+    ctx.globalAlpha = Math.min(1, popTimer / 25);
+    ctx.fillStyle = popText.startsWith('+') ? '#22ff88' : '#ff6666';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(popText, W/2, 44);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── screens ───────────────────────────────────────────────────
+function drawIdle() {
+  ctx.fillStyle = 'rgba(0,0,0,0.52)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 36px monospace';
+  ctx.fillText('SIX SEVEN', W/2, H/2 - 64);
+  ctx.fillText('FORTY ONE', W/2, H/2 - 24);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '14px monospace';
+  ctx.fillText('Help the cat hop on:', W/2, H/2 + 18);
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('6,  7,  and  41', W/2, H/2 + 48);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '13px monospace';
+  ctx.fillText('Avoid all other numbers!', W/2, H/2 + 78);
+  ctx.fillText('Tap JUMP or press SPACE', W/2, H/2 + 100);
+}
+
+function drawDead() {
+  ctx.fillStyle = 'rgba(0,0,0,0.62)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#ff5555';
+  ctx.font = 'bold 34px monospace';
+  ctx.fillText('GAME OVER', W/2, H/2 - 32);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '18px monospace';
+  ctx.fillText(`Score: ${score}`, W/2, H/2 + 8);
+  ctx.fillText(`Best:  ${best}`, W/2, H/2 + 36);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '13px monospace';
+  ctx.fillText('Tap JUMP to play again', W/2, H/2 + 70);
+}
+
+// ── main draw ─────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBg();
+  drawBlocks();
+  if (state !== 'idle') drawCat();
+  drawParticles();
+  drawFeedback();
+  if (state === 'idle') drawIdle();
+  if (state === 'dead') drawDead();
+}
+
+// ── loop ──────────────────────────────────────────────────────
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+// ── input ─────────────────────────────────────────────────────
+btn.addEventListener('click', jump);
+canvas.addEventListener('click', jump);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); jump(); }, { passive: false });
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); }
+});
+
+loop();
+</script>
+</body>
+</html>

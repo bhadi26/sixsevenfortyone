@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <title>Gnome Run — Six Seven Forty One</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; background: #0a0a1a;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: monospace; overflow: hidden;
+      touch-action: none;
+    }
+    #wrap { width: 100%; max-width: 420px; padding: 10px; }
+    #backBtn {
+      display: inline-block; padding: 6px 14px;
+      background: transparent; border: 1px solid #3a3a6a;
+      border-radius: 8px; color: #888; font-size: 12px;
+      font-family: monospace; cursor: pointer;
+      text-decoration: none; margin-bottom: 6px;
+    }
+    #backBtn:hover { color: #fff; border-color: #6a6aaa; }
+    #hud {
+      display: flex; justify-content: space-between;
+      padding: 0 4px 6px; font-size: 14px; color: #aaa;
+    }
+    #hud span { color: #fff; font-weight: bold; }
+    canvas {
+      display: block; width: 100%;
+      border-radius: 16px; border: 1px solid #2a2a5a;
+      cursor: pointer; touch-action: none;
+    }
+    #controls {
+      display: flex; gap: 8px; margin-top: 10px;
+    }
+    .ctrl-btn {
+      flex: 1; padding: 13px 0;
+      background: #1a1a3a; border: 1px solid #3a3a6a;
+      border-radius: 10px; color: #aaa;
+      font-size: 20px; font-family: monospace;
+      cursor: pointer; text-align: center;
+      touch-action: manipulation; user-select: none;
+    }
+    .ctrl-btn:active { background: #2a2a5a; color: #fff; transform: scale(0.97); }
+    #hint { text-align: center; font-size: 11px; color: #444; padding: 6px 0 0; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <a href="index.html" id="backBtn">← Home</a>
+  <div id="hud">
+    <div>Score: <span id="score">0</span></div>
+    <div>Best: <span id="best">0</span></div>
+    <div>Lives: <span id="lives">♥ ♥ ♥</span></div>
+  </div>
+  <canvas id="c"></canvas>
+  <div id="controls">
+    <div class="ctrl-btn" id="btnLeft">◀</div>
+    <div class="ctrl-btn" id="btnJump">▲ JUMP</div>
+    <div class="ctrl-btn" id="btnRight">▶</div>
+  </div>
+  <div id="hint">Swipe ← → to dodge · Swipe up or tap JUMP to leap · Collect 6, 7, 41 · Jump barriers labeled 6, 7, 41</div>
+</div>
+
+<script>
+const canvas  = document.getElementById('c');
+const ctx     = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl  = document.getElementById('best');
+const livesEl = document.getElementById('lives');
+
+// ── canvas size ───────────────────────────────────────────────
+const W = 420, H = 560;
+canvas.width = W; canvas.height = H;
+
+// ── perspective constants ─────────────────────────────────────
+const HORIZON_Y  = H * 0.38;   // where the track vanishes
+const GROUND_Y   = H - 30;     // bottom of track on screen
+const LANE_COUNT = 3;
+const LANE_W_BOT = W * 0.88;   // track width at bottom
+const LANE_W_TOP = W * 0.12;   // track width at horizon
+
+// ── game constants ────────────────────────────────────────────
+const TARGET_NUMS  = new Set([6, 7, 41]);
+const POOL_TARGETS = [6, 7, 41];
+const POOL_OTHERS  = [2, 3, 4, 5, 8, 9, 10, 13, 15, 20, 22, 30, 42, 50];
+const INITIAL_SPEED = 0.003;  // z-speed per frame (0=horizon, 1=player)
+const MAX_SPEED     = 0.010;
+const SPAWN_INTERVAL = 140;    // frames between obstacle spawns
+
+// ── state ─────────────────────────────────────────────────────
+let state = 'idle';
+let score = 0, best = 0, lives = 3;
+let speed = INITIAL_SPEED;
+let frame = 0;
+let spawnTimer = 0;
+let obstacles = [];   // { lane, z, type:'barrier'|'ring', num, isTarget, collected, hit }
+let particles = [];
+let flashTimer = 0, flashColor = '';
+let popText = '', popTimer = 0;
+let bgOffset = 0;
+
+// gnome
+let gnome = {};
+
+function resetGnome() {
+  gnome = {
+    lane: 1,          // 0=left 1=center 2=right
+    targetLane: 1,
+    laneT: 1,         // lerp 0→1 for lane switch
+    y: 0,             // jump offset (0 = ground)
+    vy: 0,
+    jumping: false,
+    squish: 1,
+    dead: false,
+    deathTimer: 0,
+  };
+}
+
+function resetGame() {
+  state = 'playing';
+  score = 0; lives = 3; speed = INITIAL_SPEED;
+  frame = 0; spawnTimer = 0;
+  obstacles = []; particles = [];
+  scoreEl.textContent = 0;
+  livesEl.textContent = livesStr(3);
+  resetGnome();
+}
+
+function livesStr(n) { return n <= 0 ? '—' : '♥ '.repeat(n).trim(); }
+
+// ── lane → screen x at a given z (0=horizon, 1=player) ───────
+function laneX(lane, z) {
+  const t   = z; // 0 at horizon, 1 at bottom
+  const tw  = LANE_W_TOP  + (LANE_W_BOT - LANE_W_TOP)  * t;
+  const cx  = W / 2;
+  const laneOffset = (lane - 1) * (tw / LANE_COUNT);
+  return cx + laneOffset;
+}
+
+function zToY(z) {
+  return HORIZON_Y + (GROUND_Y - HORIZON_Y) * z;
+}
+
+function zToScale(z) {
+  return 0.08 + z * 0.92;
+}
+
+// ── input ─────────────────────────────────────────────────────
+function moveLeft()  {
+  if (state !== 'playing' || gnome.dead) return;
+  if (gnome.targetLane > 0) { gnome.targetLane--; gnome.laneT = 0; }
+}
+function moveRight() {
+  if (state !== 'playing' || gnome.dead) return;
+  if (gnome.targetLane < 2) { gnome.targetLane++; gnome.laneT = 0; }
+}
+function doJump() {
+  if (state === 'idle' || state === 'dead') { resetGame(); return; }
+  if (!gnome.jumping && !gnome.dead) {
+    gnome.vy   = -11;
+    gnome.jumping = true;
+    gnome.squish  = 0.65;
+  }
+}
+
+// button controls
+document.getElementById('btnLeft').addEventListener('click', moveLeft);
+document.getElementById('btnLeft').addEventListener('touchstart', e => { e.preventDefault(); moveLeft(); }, { passive: false });
+document.getElementById('btnRight').addEventListener('click', moveRight);
+document.getElementById('btnRight').addEventListener('touchstart', e => { e.preventDefault(); moveRight(); }, { passive: false });
+document.getElementById('btnJump').addEventListener('click', doJump);
+document.getElementById('btnJump').addEventListener('touchstart', e => { e.preventDefault(); doJump(); }, { passive: false });
+
+// keyboard
+document.addEventListener('keydown', e => {
+  if (e.repeat) return;  // ignore key-held repeats — this was causing the glitch
+  if (e.code === 'ArrowLeft')  { e.preventDefault(); moveLeft(); }
+  if (e.code === 'ArrowRight') { e.preventDefault(); moveRight(); }
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); doJump(); }
+});
+
+// swipe detection
+let swipeStartX = 0, swipeStartY = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  swipeStartX = e.touches[0].clientX;
+  swipeStartY = e.touches[0].clientY;
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  const dx = e.changedTouches[0].clientX - swipeStartX;
+  const dy = e.changedTouches[0].clientY - swipeStartY;
+  const adx = Math.abs(dx), ady = Math.abs(dy);
+  if (adx < 8 && ady < 8) { doJump(); return; }
+  if (ady > adx) {
+    if (dy < -20) doJump();   // swipe up = jump
+  } else {
+    if (dx < -20) moveLeft();
+    if (dx >  20) moveRight();
+  }
+}, { passive: false });
+
+// ── spawn ─────────────────────────────────────────────────────
+function spawnObstacle() {
+  const lane = Math.floor(Math.random() * LANE_COUNT);
+  const type = Math.random() < 0.5 ? 'ring' : 'barrier';
+  const isTarget = Math.random() < 0.55;
+  const pool = isTarget ? POOL_TARGETS : POOL_OTHERS;
+  const num  = pool[Math.floor(Math.random() * pool.length)];
+  obstacles.push({ lane, z: 0.02, type, num, isTarget: TARGET_NUMS.has(num), collected: false, hit: false });
+}
+
+// ── particles ─────────────────────────────────────────────────
+function burst(x, y, color, n = 14) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 2 + Math.random() * 4;
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 1, r: 2+Math.random()*4, alpha: 1, color });
+  }
+}
+
+// ── update ────────────────────────────────────────────────────
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+  bgOffset += speed * 180;
+  speed = Math.min(MAX_SPEED, INITIAL_SPEED + frame * 0.000015);
+
+  // lane lerp
+  gnome.laneT = Math.min(1, gnome.laneT + 0.14);
+  gnome.lane  = gnome.lane + (gnome.targetLane - gnome.lane) * gnome.laneT;
+
+  // jump physics
+  if (gnome.jumping) {
+    gnome.vy += 1.1;
+    gnome.y  += gnome.vy;
+    // clamp so gnome never flies above the horizon
+    const maxRise = -(GROUND_Y - HORIZON_Y) * 0.72;
+    if (gnome.y < maxRise) { gnome.y = maxRise; gnome.vy = 0; }
+    if (gnome.y >= 0) { gnome.y = 0; gnome.vy = 0; gnome.jumping = false; }
+  }
+  gnome.squish += (1 - gnome.squish) * 0.18;
+
+  // death animation
+  if (gnome.dead) {
+    gnome.deathTimer++;
+    if (gnome.deathTimer > 60) {
+      if (lives <= 0) {
+        state = 'dead';
+        if (score > best) { best = score; bestEl.textContent = best; }
+      } else {
+        gnome.dead = false;
+        gnome.deathTimer = 0;
+      }
+    }
+    if (flashTimer > 0) flashTimer--;
+    if (popTimer  > 0) popTimer--;
+    return;
+  }
+
+  // spawn obstacles
+  spawnTimer++;
+  if (spawnTimer >= SPAWN_INTERVAL) { spawnTimer = 0; spawnObstacle(); }
+
+  // gnome screen position
+  const gnomeX = laneX(gnome.lane, 1);
+  const gnomeY = GROUND_Y - gnome.y * 0.6;   // jump lifts gnome up
+
+  // update obstacles
+  for (let ob of obstacles) {
+    ob.z += speed;
+
+    if (ob.z >= 0.88 && !ob.collected && !ob.hit) {
+      const obX = laneX(ob.lane, ob.z);
+      const obY = zToY(ob.z);
+      const sc  = zToScale(ob.z);
+
+      // same lane?
+      const sameLane = Math.abs(ob.lane - gnome.lane) < 0.6;
+
+      if (sameLane) {
+        if (ob.type === 'ring') {
+          // ring: collect by being in same lane at ground level (not jumping over)
+          if (ob.isTarget) {
+            ob.collected = true;
+            score++;
+            scoreEl.textContent = score;
+            flashColor = '#22ff88'; flashTimer = 14;
+            popText = `+1  ${ob.num}!`; popTimer = 55;
+            burst(obX, obY, '#ffdd44');
+          } else {
+            // wrong ring — lose life if not jumping over it
+            if (!gnome.jumping || gnome.y > -30) {
+              ob.hit = true;
+              takeDamage(obX, obY, `Not ${ob.num}!`);
+            } else {
+              ob.collected = true; // jumped over it safely
+            }
+          }
+        } else {
+          // barrier: must jump over target barriers, dodge non-target
+          if (ob.isTarget && gnome.jumping && gnome.y < -18) {
+            ob.collected = true;
+            score++;
+            scoreEl.textContent = score;
+            flashColor = '#22ff88'; flashTimer = 14;
+            popText = `+1  ${ob.num}!`; popTimer = 55;
+            burst(obX, obY, '#22ff88');
+          } else if (ob.isTarget && !gnome.jumping) {
+            ob.hit = true;
+            takeDamage(obX, obY, `Jump ${ob.num}!`);
+          } else if (!ob.isTarget) {
+            ob.hit = true;
+            takeDamage(obX, obY, `Dodge it!`);
+          }
+        }
+      }
+    }
+  }
+
+  obstacles = obstacles.filter(ob => ob.z < 1.1);
+
+  // particles
+  for (let p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.18; p.alpha -= 0.028;
+  }
+  particles = particles.filter(p => p.alpha > 0);
+
+  if (flashTimer > 0) flashTimer--;
+  if (popTimer  > 0) popTimer--;
+}
+
+function takeDamage(x, y, msg) {
+  lives--;
+  livesEl.textContent = livesStr(lives);
+  flashColor = '#ff3333'; flashTimer = 25;
+  popText = msg; popTimer = 60;
+  burst(x, y, '#ff4444');
+  gnome.dead = true;
+  gnome.deathTimer = 0;
+}
+
+// ── draw background ───────────────────────────────────────────
+function drawBg() {
+  const cx = W / 2;
+
+  // ── deep space sky ─────────────────────────────────────────
+  const sky = ctx.createLinearGradient(0, 0, 0, HORIZON_Y);
+  sky.addColorStop(0, '#020208');
+  sky.addColorStop(1, '#0d0d2e');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, HORIZON_Y);
+
+  // nebula glow
+  const neb = ctx.createRadialGradient(W*0.3, HORIZON_Y*0.4, 0, W*0.3, HORIZON_Y*0.4, W*0.55);
+  neb.addColorStop(0,  'rgba(80,20,120,0.18)');
+  neb.addColorStop(0.5,'rgba(20,10,80,0.10)');
+  neb.addColorStop(1,  'rgba(0,0,0,0)');
+  ctx.fillStyle = neb; ctx.fillRect(0, 0, W, HORIZON_Y);
+
+  // stars — twinkle using frame
+  const starData = [
+    [22,18],[55,42],[95,12],[140,38],[185,8],[230,30],[275,50],[320,14],[365,44],[410,22],
+    [40,65],[110,58],[190,72],[260,55],[340,68],[405,60],[70,82],[155,78],[310,88],[380,75],
+    [28,95],[88,105],[200,98],[295,108],[430,90],[60,120],[170,115],[350,102],[415,118],[130,92],
+  ];
+  for (let [sx, sy] of starData) {
+    const twinkle = 0.3 + 0.7 * Math.abs(Math.sin(frame * 0.04 + sx * 0.07 + sy * 0.05));
+    ctx.fillStyle = `rgba(255,255,255,${twinkle * 0.9})`;
+    const r = 0.6 + Math.sin(sx * 0.3) * 0.6;
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI*2); ctx.fill();
+  }
+
+  // moon / planet
+  const moonX = W - 55, moonY = 48;
+  const moonGlow = ctx.createRadialGradient(moonX, moonY, 10, moonX, moonY, 52);
+  moonGlow.addColorStop(0,  'rgba(200,210,255,0.20)');
+  moonGlow.addColorStop(1,  'rgba(0,0,0,0)');
+  ctx.fillStyle = moonGlow; ctx.fillRect(0, 0, W, HORIZON_Y);
+  ctx.fillStyle = 'rgba(210,215,255,0.92)';
+  ctx.beginPath(); ctx.arc(moonX, moonY, 24, 0, Math.PI*2); ctx.fill();
+  // crater details
+  ctx.fillStyle = 'rgba(150,155,200,0.5)';
+  ctx.beginPath(); ctx.arc(moonX - 8, moonY - 6, 7, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(moonX + 8, moonY + 8, 4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(moonX + 2, moonY - 12, 3, 0, Math.PI*2); ctx.fill();
+  // dark side
+  ctx.fillStyle = '#06060f';
+  ctx.beginPath(); ctx.arc(moonX + 10, moonY - 4, 20, 0, Math.PI*2); ctx.fill();
+
+  // distant planet
+  const p2x = 38, p2y = 30;
+  ctx.fillStyle = 'rgba(255,160,60,0.7)';
+  ctx.beginPath(); ctx.arc(p2x, p2y, 10, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,200,100,0.4)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(p2x, p2y, 18, 5, -0.3, 0, Math.PI*2); ctx.stroke();
+
+  // ── ground / space floor ───────────────────────────────────
+  const gnd = ctx.createLinearGradient(0, HORIZON_Y, 0, H);
+  gnd.addColorStop(0,  '#0d0d2e');
+  gnd.addColorStop(0.5,'#080820');
+  gnd.addColorStop(1,  '#050510');
+  ctx.fillStyle = gnd; ctx.fillRect(0, HORIZON_Y, W, H - HORIZON_Y);
+
+  // horizon glow — energy field
+  const hGlow = ctx.createLinearGradient(0, HORIZON_Y - 12, 0, HORIZON_Y + 20);
+  hGlow.addColorStop(0,  'rgba(80,80,255,0)');
+  hGlow.addColorStop(0.5,'rgba(80,80,255,0.28)');
+  hGlow.addColorStop(1,  'rgba(0,0,0,0)');
+  ctx.fillStyle = hGlow; ctx.fillRect(0, HORIZON_Y - 12, W, 32);
+
+  // ── perspective grid — the satisfying scroll ───────────────
+  const lineCount = 16;
+  for (let i = 0; i < lineCount; i++) {
+    const rawT = ((i / lineCount) + (bgOffset * 0.003)) % 1;
+    const t    = rawT * rawT;
+    const y    = HORIZON_Y + (GROUND_Y - HORIZON_Y) * t;
+    const lw   = LANE_W_TOP + (LANE_W_BOT - LANE_W_TOP) * t;
+    const alpha = 0.07 + t * 0.32;
+    ctx.strokeStyle = `rgba(100,100,220,${alpha})`;
+    ctx.lineWidth   = 0.5 + t * 1.6;
+    ctx.beginPath(); ctx.moveTo(cx - lw/2, y); ctx.lineTo(cx + lw/2, y); ctx.stroke();
+  }
+
+  // lane divider lines
+  const trackLines = [
+    { topX: cx - LANE_W_TOP/2, botX: cx - LANE_W_BOT/2 },
+    { topX: cx - LANE_W_TOP/6, botX: cx - LANE_W_BOT/6 },
+    { topX: cx + LANE_W_TOP/6, botX: cx + LANE_W_BOT/6 },
+    { topX: cx + LANE_W_TOP/2, botX: cx + LANE_W_BOT/2 },
+  ];
+  ctx.strokeStyle = 'rgba(80,80,200,0.5)';
+  ctx.lineWidth = 1;
+  for (let tl of trackLines) {
+    ctx.beginPath(); ctx.moveTo(tl.topX, HORIZON_Y); ctx.lineTo(tl.botX, GROUND_Y + 30); ctx.stroke();
+  }
+
+  // side walls — deep space dark
+  ctx.fillStyle = 'rgba(5,5,20,0.7)';
+  ctx.beginPath();
+  ctx.moveTo(0, HORIZON_Y);
+  ctx.lineTo(cx - LANE_W_TOP/2, HORIZON_Y);
+  ctx.lineTo(cx - LANE_W_BOT/2, GROUND_Y + 30);
+  ctx.lineTo(0, GROUND_Y + 30);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(W, HORIZON_Y);
+  ctx.lineTo(cx + LANE_W_TOP/2, HORIZON_Y);
+  ctx.lineTo(cx + LANE_W_BOT/2, GROUND_Y + 30);
+  ctx.lineTo(W, GROUND_Y + 30);
+  ctx.fill();
+
+  // ground mist / energy
+  const mist = ctx.createLinearGradient(0, GROUND_Y, 0, GROUND_Y + 40);
+  mist.addColorStop(0,  'rgba(60,60,180,0.18)');
+  mist.addColorStop(1,  'rgba(0,0,0,0)');
+  ctx.fillStyle = mist; ctx.fillRect(0, GROUND_Y, W, 40);
+}
+
+// ── draw obstacles ────────────────────────────────────────────
+function drawObstacles() {
+  // sort back to front
+  const sorted = [...obstacles].sort((a, b) => a.z - b.z);
+
+  for (let ob of sorted) {
+    if (ob.collected || ob.hit) continue;
+    const x  = laneX(ob.lane, ob.z);
+    const y  = zToY(ob.z);
+    const sc = zToScale(ob.z);
+
+    if (ob.type === 'ring') {
+      // floating ring collectible
+      const r  = sc * 28;
+      const bob = Math.sin(frame * 0.08 + ob.lane * 2) * 3 * sc;
+
+      // outer glow ring
+      ctx.strokeStyle = ob.isTarget ? `rgba(255,220,50,${0.3 + sc*0.5})` : `rgba(80,140,255,${0.3 + sc*0.5})`;
+      ctx.lineWidth   = sc * 5;
+      ctx.beginPath(); ctx.arc(x, y - r*0.8 + bob, r, 0, Math.PI*2); ctx.stroke();
+
+      // inner fill
+      ctx.fillStyle = ob.isTarget ? `rgba(255,220,50,0.18)` : `rgba(80,140,255,0.15)`;
+      ctx.beginPath(); ctx.arc(x, y - r*0.8 + bob, r * 0.72, 0, Math.PI*2); ctx.fill();
+
+      // number
+      ctx.fillStyle = ob.isTarget ? '#ffee88' : '#88bbff';
+      ctx.font      = `bold ${Math.round(sc * (ob.num >= 10 ? 16 : 20))}px monospace`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ob.num, x, y - r*0.8 + bob);
+
+    } else {
+      // barrier wall
+      const bw = sc * 54;
+      const bh = sc * 46;
+      const bx = x - bw/2;
+      const by = y - bh;
+
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(x, y, bw*0.5, 8*sc, 0, 0, Math.PI*2); ctx.fill();
+
+      // wall body
+      const wg = ctx.createLinearGradient(bx, by, bx, by+bh);
+      if (ob.isTarget) {
+        wg.addColorStop(0, '#c8780a'); wg.addColorStop(1, '#7a4800');
+      } else {
+        wg.addColorStop(0, '#2a3a8a'); wg.addColorStop(1, '#151e4a');
+      }
+      ctx.fillStyle = wg;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, sc*6);
+      ctx.fill();
+
+      // border
+      ctx.strokeStyle = ob.isTarget ? '#ffaa22' : '#4466cc';
+      ctx.lineWidth   = sc * 2;
+      ctx.stroke();
+
+      // spikes on top for non-target barriers
+      if (!ob.isTarget) {
+        ctx.fillStyle = '#4466cc';
+        for (let s = 0; s < 3; s++) {
+          const sx = bx + (s + 0.5) * (bw / 3);
+          ctx.beginPath();
+          ctx.moveTo(sx - sc*7, by);
+          ctx.lineTo(sx, by - sc*14);
+          ctx.lineTo(sx + sc*7, by);
+          ctx.closePath(); ctx.fill();
+        }
+      }
+
+      // number badge
+      const bdW = sc * (ob.num >= 10 ? 40 : 34);
+      const bdH = sc * 26;
+      ctx.fillStyle = ob.isTarget ? 'rgba(255,200,40,0.92)' : 'rgba(80,140,255,0.88)';
+      ctx.beginPath(); ctx.roundRect(x - bdW/2, by + bh/2 - bdH/2, bdW, bdH, sc*5); ctx.fill();
+      ctx.fillStyle = ob.isTarget ? '#2a1000' : '#001040';
+      ctx.font      = `bold ${Math.round(sc * (ob.num >= 10 ? 14 : 17))}px monospace`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ob.num, x, by + bh/2 + sc);
+    }
+  }
+}
+
+// ── draw gnome ────────────────────────────────────────────────
+function drawGnome() {
+  if (state === 'idle') return;
+
+  const gx  = laneX(gnome.lane, 1);
+  const gy  = GROUND_Y - gnome.y * 0.55 - 30;
+  const sq  = gnome.squish;
+  const bob = gnome.jumping ? 0 : Math.sin(frame * 0.18) * 2.5;
+
+  // shadow
+  const shadowScale = 1 - Math.abs(gnome.y) * 0.008;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(gx, GROUND_Y - 26, 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI*2); ctx.fill();
+
+  ctx.save();
+  ctx.translate(gx, gy + bob);
+  ctx.scale(1/sq, sq);
+
+  const dead = gnome.dead;
+  const bounce = gnome.jumping ? -2 : Math.sin(frame * 0.18) * 1.5;
+
+  // ── BOOTS ────────────────────────────────────────────────
+  ctx.fillStyle = '#3a2200';
+  ctx.beginPath(); ctx.roundRect(-16, 28, 13, 10, 3); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(3, 28, 13, 10, 3); ctx.fill();
+
+  // ── LEGS (blue overalls) ──────────────────────────────────
+  ctx.fillStyle = '#1a4aaa';
+  ctx.beginPath(); ctx.roundRect(-13, 14, 11, 18, 4); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(2, 14, 11, 18, 4); ctx.fill();
+
+  // ── BODY (blue overalls) ──────────────────────────────────
+  ctx.fillStyle = '#1a4aaa';
+  ctx.beginPath(); ctx.roundRect(-16, -4, 32, 22, 8); ctx.fill();
+
+  // overall straps
+  ctx.fillStyle = '#2255cc';
+  ctx.fillRect(-8, -8, 5, 10);
+  ctx.fillRect(3, -8, 5, 10);
+
+  // overall bib pocket
+  ctx.fillStyle = '#2255cc';
+  ctx.beginPath(); ctx.roundRect(-7, 0, 14, 10, 3); ctx.fill();
+
+  // ── SHIRT (white under collar) ────────────────────────────
+  ctx.fillStyle = '#eee';
+  ctx.beginPath(); ctx.roundRect(-10, -10, 20, 8, 4); ctx.fill();
+
+  // ── HEAD ─────────────────────────────────────────────────
+  ctx.fillStyle = '#f5d5a0';
+  ctx.beginPath(); ctx.ellipse(0, -20, 14, 13, 0, 0, Math.PI*2); ctx.fill();
+
+  // ── BEARD (big bushy white) ───────────────────────────────
+  ctx.fillStyle = '#e8e8e8';
+  ctx.beginPath(); ctx.ellipse(0, -10, 13, 10, 0, 0, Math.PI*2); ctx.fill();
+  // beard texture wisps
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-8, -14); ctx.quadraticCurveTo(-10, -6, -7, -1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,  -13); ctx.quadraticCurveTo(0,   -5,  0,  0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(8,  -14); ctx.quadraticCurveTo(10,  -6,  7, -1); ctx.stroke();
+
+  // mustache
+  ctx.fillStyle = '#d0d0d0';
+  ctx.beginPath(); ctx.ellipse(-5, -16, 5, 3, -0.3, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( 5, -16, 5, 3,  0.3, 0, Math.PI*2); ctx.fill();
+
+  // ── EYES ─────────────────────────────────────────────────
+  if (dead) {
+    ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 2;
+    [[-5,0],[5,0]].forEach(([ex,ey]) => {
+      const ry = -24 + ey;
+      ctx.beginPath(); ctx.moveTo(ex-3,ry-3); ctx.lineTo(ex+3,ry+3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ex+3,ry-3); ctx.lineTo(ex-3,ry+3); ctx.stroke();
+    });
+  } else {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.ellipse(-5, -24, 4, 4.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse( 5, -24, 4, 4.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#2244aa';
+    ctx.beginPath(); ctx.ellipse(-5, -24, 2.2, 3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse( 5, -24, 2.2, 3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-4, -25.5, 1, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc( 6, -25.5, 1, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ── RED POINTY HAT ────────────────────────────────────────
+  // hat brim
+  ctx.fillStyle = '#cc1111';
+  ctx.beginPath(); ctx.ellipse(0, -32, 16, 5, 0, 0, Math.PI*2); ctx.fill();
+  // hat cone
+  ctx.fillStyle = '#dd1111';
+  ctx.beginPath();
+  ctx.moveTo(-14, -32);
+  ctx.quadraticCurveTo(-8, -52, 3, -62);
+  ctx.quadraticCurveTo(10, -52, 14, -32);
+  ctx.closePath(); ctx.fill();
+  // hat highlight
+  ctx.fillStyle = 'rgba(255,100,100,0.35)';
+  ctx.beginPath();
+  ctx.moveTo(-4, -32);
+  ctx.quadraticCurveTo(-5, -48, 2, -60);
+  ctx.quadraticCurveTo(2,  -46, 0, -32);
+  ctx.closePath(); ctx.fill();
+  // hat pompom
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(3, -63, 4, 0, Math.PI*2); ctx.fill();
+
+  // ── ARMS ─────────────────────────────────────────────────
+  const armSwing = gnome.jumping ? -20 : Math.sin(frame * 0.18) * 12;
+  ctx.fillStyle = '#1a4aaa';
+  // left arm
+  ctx.save(); ctx.translate(-16, 2); ctx.rotate((-20 + armSwing) * Math.PI/180);
+  ctx.beginPath(); ctx.roundRect(-5, 0, 10, 18, 5); ctx.fill();
+  ctx.fillStyle = '#f5d5a0';
+  ctx.beginPath(); ctx.ellipse(0, 18, 5, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  // right arm
+  ctx.fillStyle = '#1a4aaa';
+  ctx.save(); ctx.translate(16, 2); ctx.rotate((20 - armSwing) * Math.PI/180);
+  ctx.beginPath(); ctx.roundRect(-5, 0, 10, 18, 5); ctx.fill();
+  ctx.fillStyle = '#f5d5a0';
+  ctx.beginPath(); ctx.ellipse(0, 18, 5, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+// ── draw particles ────────────────────────────────────────────
+function drawParticles() {
+  for (let p of particles) {
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle   = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── draw HUD overlay ──────────────────────────────────────────
+function drawHUD() {
+  if (flashTimer > 0) {
+    ctx.fillStyle   = flashColor;
+    ctx.globalAlpha = (flashTimer/26) * 0.22;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+  if (popTimer > 0) {
+    ctx.globalAlpha = Math.min(1, popTimer/28);
+    ctx.fillStyle   = popText.startsWith('+') ? '#22ff88' : '#ff6666';
+    ctx.font        = 'bold 20px monospace';
+    ctx.textAlign   = 'center';
+    ctx.fillText(popText, W/2, HORIZON_Y + 30);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawIdle() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 34px monospace';
+  ctx.fillText('GNOME RUN', W/2, H/2 - 70);
+  ctx.fillStyle = '#ffdd44'; ctx.font = '14px monospace';
+  ctx.fillText('Swipe ← → to dodge lanes', W/2, H/2 - 30);
+  ctx.fillText('Swipe UP or tap JUMP to leap', W/2, H/2 - 6);
+  ctx.fillStyle = '#88ff88'; ctx.font = 'bold 16px monospace';
+  ctx.fillText('Collect rings:  6,  7,  41', W/2, H/2 + 24);
+  ctx.fillText('Jump barriers:  6,  7,  41', W/2, H/2 + 48);
+  ctx.fillStyle = '#ff8888'; ctx.font = '13px monospace';
+  ctx.fillText('Dodge everything else!', W/2, H/2 + 72);
+  ctx.fillStyle = '#888'; ctx.font = '13px monospace';
+  ctx.fillText('Tap JUMP or swipe up to start', W/2, H/2 + 100);
+}
+
+function drawDead() {
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444'; ctx.font = 'bold 34px monospace';
+  ctx.fillText('GAME OVER', W/2, H/2 - 30);
+  ctx.fillStyle = '#fff'; ctx.font = '18px monospace';
+  ctx.fillText(`Score: ${score}`, W/2, H/2 + 10);
+  ctx.fillText(`Best:  ${best}`,  W/2, H/2 + 38);
+  ctx.fillStyle = '#aaa'; ctx.font = '13px monospace';
+  ctx.fillText('Tap JUMP to play again', W/2, H/2 + 72);
+}
+
+// ── main draw ─────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBg();
+  drawObstacles();
+  drawGnome();
+  drawParticles();
+  drawHUD();
+  if (state === 'idle') drawIdle();
+  if (state === 'dead') drawDead();
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>
