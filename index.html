@@ -142,6 +142,17 @@
       </div>
     </a>
 
+    <a class="card" href="snake.html">
+      <div class="card-preview"><canvas id="snakePreview"></canvas></div>
+      <div class="card-info">
+        <div class="card-info-left">
+          <div class="card-name">🐍 SPACE SNAKE</div>
+          <div class="card-desc">Eat 6, 7 &amp; 41 to grow · Avoid everything else</div>
+        </div>
+        <div class="card-play">PLAY →</div>
+      </div>
+    </a>
+
   </div>
   <div class="footer">sixsevenfortyone.com</div>
 </div>
@@ -452,12 +463,100 @@ function drawJumpPreview() {
   jmpCtx.beginPath(); jmpCtx.arc(px+18,py+8,1.5,0,Math.PI*2); jmpCtx.fill();
 }
 
+// ── snake preview ─────────────────────────────────────────────
+const snkC   = document.getElementById('snakePreview');
+const snkCtx = snkC.getContext('2d');
+let snkFrame = 0;
+function resizeSnk() { snkC.width = snkC.clientWidth||420; snkC.height = snkC.clientHeight||148; }
+resizeSnk();
+
+// demo snake path that loops
+const demoSnake = [
+  {x:10,y:8},{x:9,y:8},{x:8,y:8},{x:7,y:8},{x:6,y:8},
+  {x:6,y:9},{x:6,y:10},{x:7,y:10},{x:8,y:10},{x:9,y:10},
+  {x:10,y:10},{x:10,y:9}
+];
+const demoFoods = [
+  {x:13,y:8,  num:6,  isTarget:true,  pulse:0},
+  {x:4, y:10, num:15, isTarget:false, pulse:1.5},
+  {x:13,y:12, num:41, isTarget:true,  pulse:3},
+  {x:4, y:6,  num:7,  isTarget:true,  pulse:2},
+  {x:16,y:10, num:9,  isTarget:false, pulse:0.8},
+];
+
+function drawSnakePreview() {
+  resizeSnk();
+  const W=snkC.width, H=snkC.height;
+  const COLS=20, ROWS=20;
+  const CELL=Math.min(W/COLS, H/ROWS);
+  snkFrame++;
+
+  // bg
+  const bg=snkCtx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#020208'); bg.addColorStop(1,'#080818');
+  snkCtx.fillStyle=bg; snkCtx.fillRect(0,0,W,H);
+
+  // grid
+  snkCtx.strokeStyle='rgba(30,30,80,0.5)'; snkCtx.lineWidth=0.5;
+  for(let x=0;x<=COLS;x++){ snkCtx.beginPath(); snkCtx.moveTo(x*CELL,0); snkCtx.lineTo(x*CELL,H); snkCtx.stroke(); }
+  for(let y=0;y<=ROWS;y++){ snkCtx.beginPath(); snkCtx.moveTo(0,y*CELL); snkCtx.lineTo(W,y*CELL); snkCtx.stroke(); }
+
+  // foods
+  for(let f of demoFoods){
+    f.pulse+=0.05;
+    const px=f.x*CELL+CELL/2, py=f.y*CELL+CELL/2;
+    const glow=0.5+0.5*Math.sin(f.pulse), r=CELL*0.4;
+    snkCtx.fillStyle=f.isTarget?`rgba(255,200,30,${0.8+glow*0.2})`:`rgba(60,80,200,${0.75+glow*0.2})`;
+    snkCtx.beginPath(); snkCtx.arc(px,py,r,0,Math.PI*2); snkCtx.fill();
+    snkCtx.strokeStyle=f.isTarget?'#ffdd44':'#8899ff'; snkCtx.lineWidth=1.2; snkCtx.stroke();
+    snkCtx.fillStyle=f.isTarget?'#1a0e00':'#ffffff';
+    snkCtx.font=`bold ${f.num>=10?Math.round(CELL*0.38):Math.round(CELL*0.44)}px monospace`;
+    snkCtx.textAlign='center'; snkCtx.textBaseline='middle';
+    snkCtx.fillText(f.num,px,py+0.5);
+  }
+
+  // animate snake movement every 18 frames
+  if(snkFrame%18===0){
+    // move snake forward along demo path by rotating
+    const tail = demoSnake.pop();
+    // next head based on current head direction
+    const head = demoSnake[0];
+    const next = demoSnake[1];
+    const dx = head.x - next.x, dy = head.y - next.y;
+    let nx = head.x + dx, ny = head.y + dy;
+    // bounce off walls
+    if(nx<0||nx>=COLS||ny<0||ny>=ROWS){ nx=head.x-dx; ny=head.y-dy; }
+    demoSnake.unshift({x:nx,y:ny});
+  }
+
+  // draw snake
+  for(let i=0;i<demoSnake.length;i++){
+    const s=demoSnake[i], pad=1.2;
+    const t=i/demoSnake.length;
+    const r2=Math.round(40+(1-t)*60), g2=Math.round(60+(1-t)*80), b2=Math.round(180+(1-t)*60);
+    snkCtx.fillStyle=i===0?'#6688ff':`rgb(${r2},${g2},${b2})`;
+    snkCtx.beginPath();
+    snkCtx.roundRect(s.x*CELL+pad,s.y*CELL+pad,CELL-pad*2,CELL-pad*2,i===0?4:2);
+    snkCtx.fill();
+    // eyes on head
+    if(i===0){
+      snkCtx.fillStyle='#fff';
+      snkCtx.beginPath(); snkCtx.arc(s.x*CELL+CELL*0.3,s.y*CELL+CELL*0.35,2,0,Math.PI*2); snkCtx.fill();
+      snkCtx.beginPath(); snkCtx.arc(s.x*CELL+CELL*0.7,s.y*CELL+CELL*0.35,2,0,Math.PI*2); snkCtx.fill();
+      snkCtx.fillStyle='#111';
+      snkCtx.beginPath(); snkCtx.arc(s.x*CELL+CELL*0.32,s.y*CELL+CELL*0.37,1,0,Math.PI*2); snkCtx.fill();
+      snkCtx.beginPath(); snkCtx.arc(s.x*CELL+CELL*0.72,s.y*CELL+CELL*0.37,1,0,Math.PI*2); snkCtx.fill();
+    }
+  }
+}
+
 // ── main loop ─────────────────────────────────────────────────
 function loop() {
   drawBg();
   drawGnomePreview();
   drawCatPreview();
   drawJumpPreview();
+  drawSnakePreview();
   requestAnimationFrame(loop);
 }
 loop();
