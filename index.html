@@ -153,6 +153,17 @@
       </div>
     </a>
 
+    <a class="card" href="six-seven-stack.html">
+      <div class="card-preview"><canvas id="tetrisPreview"></canvas></div>
+      <div class="card-info">
+        <div class="card-info-left">
+          <div class="card-name">🟪 SIX SEVEN STACK</div>
+          <div class="card-desc">Clear rows with 6, 7 &amp; 41 for double points!</div>
+        </div>
+        <div class="card-play">PLAY →</div>
+      </div>
+    </a>
+
   </div>
   <div class="footer">sixsevenfortyone.com</div>
 </div>
@@ -550,6 +561,109 @@ function drawSnakePreview() {
   }
 }
 
+// ── tetris preview ────────────────────────────────────────────
+const tetC   = document.getElementById('tetrisPreview');
+const tetCtx = tetC.getContext('2d');
+let tetFrame = 0;
+function resizeTet() { tetC.width=tetC.clientWidth||420; tetC.height=tetC.clientHeight||148; }
+resizeTet();
+
+// static demo board for preview
+const TCOLS=11, TROWS=8;
+const demoBoard = [
+  [null,null,null,null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null,null,null,null],
+  [null,null,'#ff4455',null,null,null,null,null,null,null,null],
+  [null,'#22aaff','#22aaff',null,null,'#ffdd44','#ffdd44',null,null,null,null],
+  ['#aa44ff','#aa44ff','#aa44ff',null,'#ff9922',null,'#ffdd44',null,null,null,null],
+  ['#44ff88','#44ff88',null,'#ff9922','#ff9922',null,'#ffdd44','#44ff88',null,null,null],
+  ['#44ff88',null,'#4488ff','#4488ff','#4488ff','#ff4455','#ffdd44','#44ff88','#aa44ff','#22aaff','#ff9922'],
+];
+const demoNums = [
+  [0,0,0,0,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0],
+  [0,0,9,0,0,0,0,0,0,0,0],
+  [0,5,5,0,0,7,7,0,0,0,0],
+  [3,3,3,0,20,0,41,0,0,0,0],
+  [6,6,0,20,20,0,41,13,0,0,0],
+  [6,0,7,7,7,9,41,13,2,5,20],
+];
+// falling demo piece
+let demoP = { shape:[[1,1,1],[0,1,0]], color:'#aa44ff', cells:[[41,6,7],[0,3,0]], x:3, y:0 };
+let demoPY = 0;
+
+function drawTetrisPreview() {
+  resizeTet();
+  const W=tetC.width, H=tetC.height;
+  const cell=Math.min((W-4)/TCOLS, (H-4)/TROWS);
+  const offX=(W-cell*TCOLS)/2, offY=2;
+  tetFrame++;
+
+  // bg
+  const bg=tetCtx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#020208'); bg.addColorStop(1,'#070714');
+  tetCtx.fillStyle=bg; tetCtx.fillRect(0,0,W,H);
+
+  // grid
+  tetCtx.strokeStyle='rgba(20,20,60,0.7)'; tetCtx.lineWidth=0.4;
+  for(let c=0;c<=TCOLS;c++){ tetCtx.beginPath(); tetCtx.moveTo(offX+c*cell,offY); tetCtx.lineTo(offX+c*cell,offY+TROWS*cell); tetCtx.stroke(); }
+  for(let r=0;r<=TROWS;r++){ tetCtx.beginPath(); tetCtx.moveTo(offX,offY+r*cell); tetCtx.lineTo(offX+TCOLS*cell,offY+r*cell); tetCtx.stroke(); }
+
+  // board cells
+  for(let r=0;r<TROWS;r++){
+    for(let c=0;c<TCOLS;c++){
+      if(!demoBoard[r][c]) continue;
+      const px=offX+c*cell, py=offY+r*cell;
+      const num=demoNums[r][c];
+      const isT=new Set([6,7,41]).has(num);
+      tetCtx.fillStyle=demoBoard[r][c];
+      tetCtx.beginPath(); tetCtx.roundRect(px+1,py+1,cell-2,cell-2,2); tetCtx.fill();
+      tetCtx.fillStyle='rgba(255,255,255,0.2)';
+      tetCtx.beginPath(); tetCtx.roundRect(px+1,py+1,cell-2,(cell-2)*0.4,2); tetCtx.fill();
+      if(num){
+        tetCtx.fillStyle=isT?'#fff':'rgba(0,0,0,0.5)';
+        if(isT){ tetCtx.shadowColor='#fff'; tetCtx.shadowBlur=3; }
+        tetCtx.font=`bold ${num>=10?Math.round(cell*0.3):Math.round(cell*0.36)}px monospace`;
+        tetCtx.textAlign='center'; tetCtx.textBaseline='middle';
+        tetCtx.fillText(num,px+cell/2,py+cell/2+0.5);
+        tetCtx.shadowBlur=0;
+      }
+    }
+  }
+
+  // animate demo falling piece
+  if(tetFrame%22===0){ demoPY+=0.5; if(demoPY>3) demoPY=0; }
+  const pieceY=Math.floor(demoPY);
+  for(let r=0;r<demoP.shape.length;r++){
+    for(let c=0;c<demoP.shape[r].length;c++){
+      if(!demoP.shape[r][c]) continue;
+      const num=demoP.cells[r][c];
+      if(!num) continue;
+      const px=offX+(demoP.x+c)*cell, py=offY+(pieceY+r)*cell;
+      const isT=new Set([6,7,41]).has(num);
+      tetCtx.fillStyle=demoP.color;
+      tetCtx.beginPath(); tetCtx.roundRect(px+1,py+1,cell-2,cell-2,2); tetCtx.fill();
+      tetCtx.fillStyle='rgba(255,255,255,0.25)';
+      tetCtx.beginPath(); tetCtx.roundRect(px+1,py+1,cell-2,(cell-2)*0.4,2); tetCtx.fill();
+      tetCtx.fillStyle=isT?'#fff':'rgba(0,0,0,0.5)';
+      if(isT){ tetCtx.shadowColor='#fff'; tetCtx.shadowBlur=3; }
+      tetCtx.font=`bold ${num>=10?Math.round(cell*0.3):Math.round(cell*0.36)}px monospace`;
+      tetCtx.textAlign='center'; tetCtx.textBaseline='middle';
+      tetCtx.fillText(num,px+cell/2,py+cell/2+0.5);
+      tetCtx.shadowBlur=0;
+    }
+  }
+
+  // highlight bottom row (has 6,7,41 — would score double)
+  const rowY=offY+(TROWS-1)*cell;
+  tetCtx.strokeStyle='rgba(255,220,50,0.5)'; tetCtx.lineWidth=1.5;
+  tetCtx.beginPath(); tetCtx.roundRect(offX+1,rowY+1,TCOLS*cell-2,cell-2,2); tetCtx.stroke();
+  tetCtx.fillStyle='rgba(255,220,50,0.08)';
+  tetCtx.beginPath(); tetCtx.roundRect(offX+1,rowY+1,TCOLS*cell-2,cell-2,2); tetCtx.fill();
+}
+
 // ── main loop ─────────────────────────────────────────────────
 function loop() {
   drawBg();
@@ -557,6 +671,7 @@ function loop() {
   drawCatPreview();
   drawJumpPreview();
   drawSnakePreview();
+  drawTetrisPreview();
   requestAnimationFrame(loop);
 }
 loop();
